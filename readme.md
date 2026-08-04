@@ -1,4 +1,4 @@
-```
+```bash
 # 手动创建工程
 ~/.platformio/penv/bin/pio project init \
   --project-dir /home/shuaijie/ROS2_Car \
