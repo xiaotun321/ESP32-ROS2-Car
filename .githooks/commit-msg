@@ -1,0 +1,13 @@
+#!/bin/sh
+
+commit_msg_file="$1"
+commit_msg=$(sed -n '1p' "$commit_msg_file")
+
+pattern='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)#[0-9]+: .+'
+
+if ! printf '%s\n' "$commit_msg" | grep -Eq "$pattern"; then
+    echo "提交信息格式错误！"
+    echo "正确格式：<type>#<任务号>: <提交说明>"
+    echo "示例：feat#50073: 增加小车速度控制"
+    exit 1
+fi
