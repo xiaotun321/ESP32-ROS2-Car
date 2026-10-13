@@ -4,6 +4,7 @@
 #include <string.h>
 #include "robot_config.h"
 #include "motion_math.h"
+#include "ros_wifi.h"
 
 namespace {
 struct Encoder {
@@ -40,6 +41,7 @@ uint32_t previousCounts[2] = {}, lastCommand = 0, lastControl = 0;
 int previousDirection[2] = {};
 const char *fault = nullptr;
 bool telemetry = false;
+bool rosOwnsMotion = false;
 void drive(int wheel, int value) {
     value = constrain(value, -config::MAX_PWM, config::MAX_PWM);
     output[wheel] = value;
@@ -52,18 +54,36 @@ void drive(int wheel, int value) {
 void stop() {
     digitalWrite(config::STBY, LOW);
     mode = Mode::Stopped;
+    rosOwnsMotion = false;
     for (int i = 0; i < 2; ++i) {
         drive(i, 0); target[i] = 0; previousDirection[i] = 0;
     }
 }
 void trip(const char *reason) { stop(); fault = reason; Serial.printf("FAULT %s\n", reason); }
-void setTarget(float left, float right) {
+void setTarget(float left, float right, bool fromRos = false) {
     if (fault) { Serial.println("ERR fault latched; inspect then clear"); return; }
     motion::limitPair(left, right, config::MAX_PWM);
     if (left == 0 && right == 0) { stop(); return; }
     const uint32_t now = millis();
     target[0] = left; target[1] = right;
     mode = Mode::Pwm; lastCommand = now;
+    rosOwnsMotion = fromRos;
+}
+void readRos() {
+    if (rosOwnsMotion && !rosWifiConnected()) stop();
+    RosCommand message;
+    if (!rosWifiTakeCommand(message)) return;
+    if (!rosWifiConnected() || millis() - message.receivedMs >= config::COMMAND_TIMEOUT_MS) {
+        if (rosOwnsMotion) stop();
+        return;
+    }
+    float left, right;
+    if (!motion::twistToPwm(message.linear, message.angular, config::LINEAR_PWM_GAIN,
+                           config::ANGULAR_PWM_GAIN, left, right)) {
+        stop(); Serial.println("ERR invalid ROS Twist; stopped"); return;
+    }
+    setTarget(left, right, true);
+    if (rosOwnsMotion) lastCommand = message.receivedMs;
 }
 void version() {
     Serial.printf("firmware=%s motor_sign=%d,%d\n", config::FIRMWARE_VERSION,
@@ -71,6 +91,8 @@ void version() {
 }
 void status() {
     version();
+    Serial.printf("ros=%s owner=%s\n", rosWifiConnected() ? "connected" : "waiting",
+                  mode == Mode::Stopped ? "none" : rosOwnsMotion ? "ros" : "serial");
     uint32_t counts[2]; readEncoders(counts);
     Serial.printf("mode=%s fault=%s ticks=%ld,%ld tps=%.1f,%.1f target=%.1f,%.1f pwm=%d,%d",
                   mode == Mode::Stopped ? "stop" : "pwm",
@@ -178,9 +200,10 @@ void setup() {
         attachInterruptArg(e.b, encoderInterrupt, &e, CHANGE);
     }
     readEncoders(previousCounts); lastControl = millis(); help();
+    if (!rosWifiBegin()) trip("ros_task_start_failed");
 }
 void loop() {
-    control(millis()); readSerial();
+    readRos(); control(millis()); readSerial();
     static uint32_t lastReport = 0;
     if (telemetry && millis() - lastReport >= 200) { lastReport = millis(); status(); }
     delay(1);
