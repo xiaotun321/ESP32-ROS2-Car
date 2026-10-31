@@ -1,6 +1,6 @@
 # ESP32-S3 双轮 PWM 开环小车
 
-硬件为 ESP32-S3、TB6612FNG、两台 MG310 电机和前方万向支撑轮。沿用原理图引脚；不使用 IMU、PID 或自平衡。支持树莓派 ROS 2 Jazzy 通过 Wi-Fi micro-ROS 下发运动指令，以及本地串口 PWM 调试。电机保持开环，编码器仅显示计数和实测转速，不调整输出，也不因编码器无信号而停止。
+硬件为 ESP32-S3、TB6612FNG、两台 MG310 电机和前方万向支撑轮。沿用原理图引脚；不使用 IMU、PID 或自平衡。支持 ROS 2 Jazzy 通过 USB 串口 micro-ROS 下发运动指令，以及本地串口 PWM 调试。电机保持开环，编码器仅显示计数和实测转速，不调整输出，也不因编码器无信号而停止。
 
 用户提供的参数：轮径 48 mm、减速比 1:20、额定电压 7.4V、额定转速 400±13% RPM、额定电流 ≤500mA、堵转电流 ≤2A。车体尺寸 147.5×144 mm。开环控制不需要轮距。
 
@@ -42,7 +42,20 @@ pio run --target upload --upload-port COM5
 pio device monitor --port COM5 --baud 115200
 ```
 
-COM5 为示例，替换成实际端口。按用户要求设置 `ARDUINO_USB_CDC_ON_BOOT=0`，本地调试使用 UART0/USB 转串口；Wi-Fi 与该串口独立。上电保持停止。
+COM5 为示例，替换成实际端口。**烧录和串口监视器都用板载 USB 转串口口**（UART0），原生 USB 口留给 Linux 跑 Agent；两个口在 Windows 上是两个 COM，插错口会看不到日志。上电保持停止。
+
+## 两条 USB 通道的分工
+
+ESP32-S3-DevKitC-1 有两个 USB 口，本工程各用一路，互不冲突：
+
+| 物理口 | 芯片内对象 | 用途 | 另一端 |
+| --- | --- | --- | --- |
+| **USB**（原生 USB-OTG，硬件 CDC） | `Serial` | **micro-ROS 串口 Agent**，跑 XRCE-DDS 帧 | Linux 电脑，`/dev/ttyACM0` |
+| **UART**（板载 USB 转串口桥） | `Serial0` | **命令协议与调试日志**，115200 | Windows 开发机，COM 口 |
+
+对应 `platformio.ini` 中的 `ARDUINO_USB_CDC_ON_BOOT=1`：开了这个宏 `Serial` 才是原生 USB CDC，否则 `Serial` 是 UART0、与命令协议抢同一个口。
+
+因此两条线的分工是硬性的：**Windows 端用板载 USB 转串口口看日志、发 `w/s/a/d`；Linux 端用原生 USB 口接 micro-ROS Agent。** 串口监视器和 micro-ROS Agent 不要打开同一个端口（Windows 的 COM 口独占）。
 
 串口 115200，每行一条指令，以 LF 或 CRLF 结束：
 
@@ -62,7 +75,7 @@ COM5 为示例，替换成实际端口。按用户要求设置 `ARDUINO_USB_CDC_
 | `help` | 指令帮助 |
 | `version` | 显示固件版本和实际生效的电机方向配置 |
 
-保留实车右轮反向修正 `MOTOR_SIGN = {1, -1}`。重新上传后发送 `version`，应看到 `firmware=pwm-r3-wifi-jazzy motor_sign=1,-1`；仅编译不会更新板上程序。若方向仍不对，分别发送 `pwm 80 0` 和 `pwm 0 80`，核对实际转动的是哪侧车轮以及方向。
+保留实车右轮反向修正 `MOTOR_SIGN = {1, -1}`。重新上传后发送 `version`，应看到 `firmware=pwm-r4-usbserial-jazzy motor_sign=1,-1`；仅编译不会更新板上程序。若方向仍不对，分别发送 `pwm 80 0` 和 `pwm 0 80`，核对实际转动的是哪侧车轮以及方向。
 
 默认 PWM 上限 ±180（满量程 255），超限时左右同比例缩放。快捷键幅度可修改 `JOG_PWM`。串口不提供 `ticks`、`rpm`、`cmd_vel`、`zero` 指令；ROS `/cmd_vel` 话题另见下文。RPM 仅作为串口观测数据，没有发布里程计。PWM 数值不是转速，开环下负载和电池电压变化会使转速变化，两轮相同 PWM 也不保证走直线。
 
@@ -95,13 +108,18 @@ cl /nologo /EHsc /std:c++14 /Itest\host /Iinclude test\host\test_motion.cpp /Fo.
 
 固件为 `.pio/build/esp32-s3-devkitm-1/firmware.bin`。编译和主机测试不能代替烧录后的实际转向、接线与供电验证。
 
-## 树莓派 Jazzy / Wi-Fi
+## ROS 2 Jazzy / USB 串口 Agent
 
-`platformio.ini` 已设置 Wi-Fi 名称 804、用户提供的密码、Agent `192.168.0.107:8888`、`MICRO_ROS_DOMAIN_ID=0`。密码仅在配置中，不在运行日志中打印；分享工程前自行去除 Wi-Fi 凭据。树莓派连上同一局域网后用 `hostname -I` 确认地址，地址变化需修改宏并重新上传。
+micro-ROS 走原生 USB CDC 串口传输，`MICRO_ROS_DOMAIN_ID=0`、波特率 `MICRO_ROS_SERIAL_BAUD=115200`（CDC 设备上波特率实际被忽略，仅作占位）。不再需要 Wi-Fi、IP 或 UDP 端口配置。
 
 依赖固定为官方 `micro_ros_arduino v2.0.8-jazzy`。Windows 下使用 `tools/link_microros.py` 显式链接发布包中的 `src/esp32/libmicroros.a`：该版本的官方生成脚本对 ESP32 和 ESP32-S3 使用相同的工具链配置和 colcon 配置。适配范围为本工程固定的 Arduino 2.0.17 / espressif32 6.11.0；升级平台后需重新验证。官方另提供面向 PlatformIO 的源码构建方案，见 [micro_ros_platformio](https://github.com/micro-ROS/micro_ros_platformio)。当前选择预编译包以支持这台 Windows 开发机；首次编译需要联网下载依赖。
 
-树莓派包 `D:/car/Raspberry-Pi-5_ROS2-Car/src/tb6612_car_ros2` 已修改键盘入口和 10 Hz 指令刷新逻辑。将更新后的包同步到树莓派的 ROS 工作区，在工作区根目录执行（假设该目录是 `~/car_ws`）：
+串口传输与 UDP 传输有两处关键差别，本工程已在 `src/ros_agent.cpp` 里处理：
+
+- **framing 必须打开**（`rmw_uros_set_custom_transport(true, ...)`）。UDP 是数据报，XRCE 帧自带长度；串口是字节流，必须靠 XRCE framing 定界。
+- **不能在传输关闭时调用 `Serial.end()`**。Arduino-ESP32 的 `HWCDC::end()` 会 deinit USB 外设、释放中断和缓冲区，Linux 端的 `/dev/ttyACM0` 会直接消失，正在运行的 Agent 会话随之崩溃。本工程自写 transport，`open`/`close` 均为空操作，CDC 只在 `rosAgentBegin()` 里初始化一次。
+
+上位机包 `D:/car/Raspberry-Pi-5_ROS2-Car/src/tb6612_car_ros2` 已修改键盘入口和 10 Hz 指令刷新逻辑。将更新后的包同步到 ROS 工作区，在工作区根目录执行（假设该目录是 `~/car_ws`）：
 
 ```bash
 cd ~/car_ws
@@ -109,8 +127,16 @@ source /opt/ros/jazzy/setup.bash
 colcon build --packages-select tb6612_car_ros2 --symlink-install
 source install/setup.bash
 export ROS_DOMAIN_ID=0
-ros2 launch tb6612_car_ros2 car_bringup.launch.py transport:=udp4 udp_port:=8888
+ros2 launch tb6612_car_ros2 car_bringup.launch.py transport:=serial
 ```
+
+也可以不带 launch，单独启动串口 Agent（Linux 端，先插好原生 USB 口）：
+
+```bash
+ros2 run micro_ros_agent micro_ros_agent serial --port /dev/ttyACM0 --baud 115200
+```
+
+`/dev/ttyACM0` 以 `dmesg | tail` 或 `ls /dev/ttyACM*` 为准；若提示权限不足，用 udev 规则或临时 `sudo chmod a+rw /dev/ttyACM0`。不要同时运行 launch 和独立 Agent（会争抢同一个串口）。
 
 第二个终端：
 
@@ -121,8 +147,6 @@ source install/setup.bash
 export ROS_DOMAIN_ID=0
 ros2 run tb6612_car_ros2 keyboard_teleop
 ```
-
-树莓派需已安装/构建 Jazzy 的 `micro_ros_agent`；可单独运行 `ros2 run micro_ros_agent micro_ros_agent udp4 --port 8888` 代替 launch（不要同时运行两个 Agent 占用同一个端口）。本固件只有 Wi-Fi micro-ROS 传输，不能使用上位机 launch 的 `transport:=serial`。
 
 ROS 键盘布局：**w 前进、x 后退、a 左转、d 右转、s/空格停止**，与本地串口的 s/x 含义不同。持续按方向键移动；最后一次方向按键后默认 0.6 秒清零，可用 `--ros-args -p key_timeout:=0.8` 调整。Ctrl-C 退出时发送零指令。
 
@@ -135,7 +159,7 @@ right_pwm = linear.x * LINEAR_PWM_GAIN + angular.z * ANGULAR_PWM_GAIN
 
 默认 `linear.x=0.15` 对应 PWM 80/80，`angular.z=0.8` 对应 PWM -80/80。增益在 `robot_config.h` 中修改；这是开环映射，不是经过校准的车速或转速控制。没有 PID，没有 IMU，也不需要轮距。编码器仍只在串口显示。
 
-网络连接和 ROS executor 在独立 FreeRTOS 任务中执行；控制循环不等待 Wi-Fi 或 Agent。失去 Agent/Wi-Fi 时停止 ROS 驱动的运动，断线自动重连，重连不会重放旧指令。500 ms 收不到新指令仍会停车。串口和 ROS 都能控制，最新运动指令生效；串口试车前退出 ROS 遥控节点，避免周期性 ROS 指令覆盖手动操作。串口 `stop` 不是锁定急停。
+USB 串口连接和 ROS executor 在独立 FreeRTOS 任务中执行；控制循环不等待 Agent。失去 Agent 时停止 ROS 驱动的运动，断线自动重连，重连不会重放旧指令。500 ms 收不到新指令仍会停车。串口和 ROS 都能控制，最新运动指令生效；串口试车前退出 ROS 遥控节点，避免周期性 ROS 指令覆盖手动操作。串口 `stop` 不是锁定急停。
 
 检查连接：
 
@@ -144,6 +168,8 @@ ros2 node list
 ros2 topic info /cmd_vel -v
 ```
 
-串口应出现 `WiFi connected: ...` 和 `ROS connected: /tb6612_base_node ...`；`status` 显示 `ros=connected` 及当前控制来源。如果 Wi-Fi 已连接但 ROS 未连接，检查树莓派 IP、UDP 8888、防火墙/AP 客户端隔离以及 Agent 是否已启动。节点存在但收不到命令时检查两端 `ROS_DOMAIN_ID` 是否一致。
+Windows 端串口应出现 `ROS connected: /tb6612_base_node (USB serial agent)`；`status` 显示 `ros=connected` 及当前控制来源。如果串口没有这条日志，检查 Linux 端是否已启动 Agent、原生 USB 口是否插好（插错口会落到板载 USB 转串口口上），以及 `/dev/ttyACM0` 的权限。节点存在但收不到命令时检查两端 `ROS_DOMAIN_ID` 是否一致。
+
+> 提示：如果日志里反复出现 `ROS disconnected; waiting for agent`，说明会话内的 ping 没能按时拿到应答。串口上往返时间不到 1 ms，若仍发生，通常是 Agent 侧未运行或未打开串口，而不是链路问题。
 
 新增主机测试覆盖 Twist 映射、断线停车、丢弃过期命令、重连不自动恢复、非法浮点数以及键盘心跳/松键超时。运行 `python -m unittest discover -s test -p test_pi_teleop.py -v` 检查实际树莓派 Python 源码（用 ROS/终端桩，无需本机安装 ROS）。尚需在实际 Wi-Fi 网络上完成两端联调。

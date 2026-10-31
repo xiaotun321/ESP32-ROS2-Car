@@ -4,6 +4,6 @@ struct RosCommand {
     double linear, angular;
     uint32_t receivedMs;
 };
-bool rosWifiBegin();
-bool rosWifiConnected();
-bool rosWifiTakeCommand(RosCommand &command);
+bool rosAgentBegin();
+bool rosAgentConnected();
+bool rosAgentTakeCommand(RosCommand &command);

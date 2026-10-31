@@ -4,7 +4,11 @@
 #include <string.h>
 #include "robot_config.h"
 #include "motion_math.h"
-#include "ros_wifi.h"
+#include "ros_agent.h"
+
+#if !ARDUINO_USB_CDC_ON_BOOT
+#error "The native USB CDC (Serial) belongs to the micro-ROS serial agent; set ARDUINO_USB_CDC_ON_BOOT=1 and keep the console on Serial0 (UART0)."
+#endif
 
 namespace {
 struct Encoder {
@@ -59,9 +63,9 @@ void stop() {
         drive(i, 0); target[i] = 0; previousDirection[i] = 0;
     }
 }
-void trip(const char *reason) { stop(); fault = reason; Serial.printf("FAULT %s\n", reason); }
+void trip(const char *reason) { stop(); fault = reason; Serial0.printf("FAULT %s\n", reason); }
 void setTarget(float left, float right, bool fromRos = false) {
-    if (fault) { Serial.println("ERR fault latched; inspect then clear"); return; }
+    if (fault) { Serial0.println("ERR fault latched; inspect then clear"); return; }
     motion::limitPair(left, right, config::MAX_PWM);
     if (left == 0 && right == 0) { stop(); return; }
     const uint32_t now = millis();
@@ -70,42 +74,42 @@ void setTarget(float left, float right, bool fromRos = false) {
     rosOwnsMotion = fromRos;
 }
 void readRos() {
-    if (rosOwnsMotion && !rosWifiConnected()) stop();
+    if (rosOwnsMotion && !rosAgentConnected()) stop();
     RosCommand message;
-    if (!rosWifiTakeCommand(message)) return;
-    if (!rosWifiConnected() || millis() - message.receivedMs >= config::COMMAND_TIMEOUT_MS) {
+    if (!rosAgentTakeCommand(message)) return;
+    if (!rosAgentConnected() || millis() - message.receivedMs >= config::COMMAND_TIMEOUT_MS) {
         if (rosOwnsMotion) stop();
         return;
     }
     float left, right;
     if (!motion::twistToPwm(message.linear, message.angular, config::LINEAR_PWM_GAIN,
                            config::ANGULAR_PWM_GAIN, left, right)) {
-        stop(); Serial.println("ERR invalid ROS Twist; stopped"); return;
+        stop(); Serial0.println("ERR invalid ROS Twist; stopped"); return;
     }
     setTarget(left, right, true);
     if (rosOwnsMotion) lastCommand = message.receivedMs;
 }
 void version() {
-    Serial.printf("firmware=%s motor_sign=%d,%d\n", config::FIRMWARE_VERSION,
+    Serial0.printf("firmware=%s motor_sign=%d,%d\n", config::FIRMWARE_VERSION,
                   config::MOTOR_SIGN[0], config::MOTOR_SIGN[1]);
 }
 void status() {
     version();
-    Serial.printf("ros=%s owner=%s\n", rosWifiConnected() ? "connected" : "waiting",
+    Serial0.printf("ros=%s owner=%s\n", rosAgentConnected() ? "connected" : "waiting",
                   mode == Mode::Stopped ? "none" : rosOwnsMotion ? "ros" : "serial");
     uint32_t counts[2]; readEncoders(counts);
-    Serial.printf("mode=%s fault=%s ticks=%ld,%ld tps=%.1f,%.1f target=%.1f,%.1f pwm=%d,%d",
+    Serial0.printf("mode=%s fault=%s ticks=%ld,%ld tps=%.1f,%.1f target=%.1f,%.1f pwm=%d,%d",
                   mode == Mode::Stopped ? "stop" : "pwm",
                   fault ? fault : "none", static_cast<long>(static_cast<int32_t>(counts[0])),
                   static_cast<long>(static_cast<int32_t>(counts[1])), measured[0], measured[1],
                   target[0], target[1], output[0], output[1]);
-    Serial.printf(" rpm=%.2f,%.2f", measured[0] * 60 / config::COUNTS_PER_REV,
+    Serial0.printf(" rpm=%.2f,%.2f", measured[0] * 60 / config::COUNTS_PER_REV,
                                  measured[1] * 60 / config::COUNTS_PER_REV);
-    Serial.println();
+    Serial0.println();
 }
 void help() {
     version();
-    Serial.println("Commands (newline terminated, repeat motion commands every 100 ms):\n"
+    Serial0.println("Commands (newline terminated, repeat motion commands every 100 ms):\n"
                    "w/s/a/d: forward/back/left/right at PWM 80; x or stop: stop\n"
                    "pwm LEFT RIGHT: signed duty [-180,180], open loop\n"
                    "version | status | stream 0/1 | clear | help\n"
@@ -128,7 +132,7 @@ void command(char *line) {
         if (!strcmp(name, "status")) { status(); return; }
         if (!strcmp(name, "version")) { version(); return; }
         if (!strcmp(name, "help")) { help(); return; }
-        if (!strcmp(name, "clear")) { stop(); fault = nullptr; Serial.println("OK cleared"); return; }
+        if (!strcmp(name, "clear")) { stop(); fault = nullptr; Serial0.println("OK cleared"); return; }
 
         const float jog = config::JOG_PWM;
         if (!strcmp(name, "w")) { setTarget(jog, jog); return; }
@@ -137,25 +141,25 @@ void command(char *line) {
         if (!strcmp(name, "d")) { setTarget(jog, -jog); return; }
     }
     if (count == 2 && !strcmp(name, "stream") && (!strcmp(args[1], "0") || !strcmp(args[1], "1"))) {
-        telemetry = args[1][0] == '1'; Serial.println("OK"); return;
+        telemetry = args[1][0] == '1'; Serial0.println("OK"); return;
     }
     float left, right;
     if (count == 3 && parseNumber(args[1], left) && parseNumber(args[2], right)) {
         if (!strcmp(name, "pwm")) { setTarget(left, right); return; }
     }
-    stop(); Serial.println("ERR invalid command; stopped");
+    stop(); Serial0.println("ERR invalid command; stopped");
 }
 void readSerial() {
     static char buffer[96]; static unsigned used = 0; static bool discard = false;
     // Bound work so flooding the serial port cannot starve control.
-    for (unsigned budget = 0; budget < 64 && Serial.available(); ++budget) {
-        const char c = Serial.read();
+    for (unsigned budget = 0; budget < 64 && Serial0.available(); ++budget) {
+        const char c = Serial0.read();
         if (c == '\r' || c == '\n') {
             if (!discard && used) { buffer[used] = '\0'; command(buffer); }
             used = 0; discard = false;
         } else if (!discard) {
             if (c < 32 || c > 126 || used == sizeof(buffer) - 1) {
-                discard = true; stop(); Serial.println("ERR invalid/long line; stopped");
+                discard = true; stop(); Serial0.println("ERR invalid/long line; stopped");
             } else buffer[used++] = c;
         }
     }
@@ -173,7 +177,7 @@ void control(uint32_t now) {
     }
 
     if (mode == Mode::Stopped) return;
-    if (now - lastCommand >= config::COMMAND_TIMEOUT_MS) { stop(); Serial.println("STOP timeout"); return; }
+    if (now - lastCommand >= config::COMMAND_TIMEOUT_MS) { stop(); Serial0.println("STOP timeout"); return; }
     if (elapsed > 100) { trip("control_overrun"); return; }
     for (int i = 0; i < 2; ++i) {
         const int value = lroundf(target[i]);
@@ -188,7 +192,7 @@ void control(uint32_t now) {
 }
 void setup() {
     pinMode(config::STBY, OUTPUT); digitalWrite(config::STBY, LOW);
-    Serial.begin(115200);
+    Serial0.begin(115200);
     for (int i = 0; i < 2; ++i) {
         pinMode(config::IN1[i], OUTPUT); pinMode(config::IN2[i], OUTPUT);
         ledcSetup(i, config::PWM_HZ, 8); ledcAttachPin(config::PWM[i], i);
@@ -200,7 +204,7 @@ void setup() {
         attachInterruptArg(e.b, encoderInterrupt, &e, CHANGE);
     }
     readEncoders(previousCounts); lastControl = millis(); help();
-    if (!rosWifiBegin()) trip("ros_task_start_failed");
+    if (!rosAgentBegin()) trip("ros_task_start_failed");
 }
 void loop() {
     readRos(); control(millis()); readSerial();

@@ -1,6 +1,6 @@
 #pragma once
 namespace config {
-constexpr const char *FIRMWARE_VERSION = "pwm-r3-wifi-jazzy";
+constexpr const char *FIRMWARE_VERSION = "pwm-r4-usbserial-jazzy";
 // Schematic U8/channel A = left, U9/channel B = right (installation convention).
 constexpr int PWM[2] = {14, 17}, IN1[2] = {15, 18}, IN2[2] = {16, 21};
 constexpr int STBY = 47;
